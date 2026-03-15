@@ -1,0 +1,314 @@
+\documentclass[aspectratio=169]{beamer}
+
+\usetheme{Madrid}
+\usecolortheme{seahorse}
+
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\title{Meeting 2: How the Real System Works}
+\subtitle{Autonomy Onboarding}
+\author{MIT Arcturus}
+\date{}
+
+\begin{document}
+
+\begin{frame}
+    \titlepage
+\end{frame}
+
+% ============================================================
+\section{Big Picture}
+% ============================================================
+
+\begin{frame}{Last Time}
+    You built a simplified autonomy pipeline:
+    \vfill
+    \begin{center}
+        Known buoy positions $\rightarrow$ Compute midpoint $\rightarrow$ PID control $\rightarrow$ Move boat
+    \end{center}
+    \vfill
+    The real boat does the same thing, but each step is more complex.
+    \vfill
+    Today we'll walk through the real system and see how it all connects.
+\end{frame}
+
+\begin{frame}{The Real Pipeline}
+    \begin{center}
+        \Large
+        Perception $\rightarrow$ Mapping $\rightarrow$ Planning $\rightarrow$ Control
+    \end{center}
+    \vfill
+    \begin{enumerate}
+        \item Perception --- cameras and LiDAR figure out what's around us
+        \item Mapping --- track those detections over time, build a map
+        \item Planning --- decide where to go and find a path there
+        \item Control --- follow that path with the motors
+    \end{enumerate}
+    \vfill
+    A task manager sits on top and tells the system what to do (``go through the gates,'' ``circle the buoy,'' etc.)
+\end{frame}
+
+% ============================================================
+\section{Perception}
+% ============================================================
+
+\begin{frame}{Perception: What's Around Us?}
+    The boat has two main sensors:
+    \vfill
+    \begin{itemize}
+        \item Cameras --- see color and shape (like your eyes)
+        \item LiDAR --- measures distance to objects using lasers (like sonar but with light)
+    \end{itemize}
+    \vfill
+    Cameras are good at recognizing what something is (red buoy vs green buoy).\\
+    LiDAR is good at knowing exactly where something is in 3D.\\
+    \vfill
+    We combine both to get labeled 3D positions of obstacles.
+\end{frame}
+
+\begin{frame}{Step 1: Object Detection (YOLO)}
+    A neural network called YOLO looks at each camera frame and draws bounding boxes around objects it recognizes.
+    \vfill
+    Output: ``there's a red buoy in this rectangle of the image''
+    \vfill
+    This tells us what and roughly where in the image, but not how far away.
+    \vfill
+    % TODO: screenshot of YOLO detections on a camera frame
+    \begin{center}
+        \textit{(YOLO detection screenshot here)}
+    \end{center}
+\end{frame}
+
+\begin{frame}{Step 2: Depth from LiDAR}
+    LiDAR gives us a 3D point cloud --- thousands of distance measurements.
+    \vfill
+    We project the LiDAR points onto the camera image. Points that land inside a YOLO bounding box get that box's label.
+    \vfill
+    Now we know: ``these 3D points are a red buoy.''
+    \vfill
+    This happens in the \texttt{bbox\_project\_pcloud} node.
+    \vfill
+    % TODO: diagram showing camera image + lidar points overlay
+    \begin{center}
+        \textit{(LiDAR + camera fusion diagram here)}
+    \end{center}
+\end{frame}
+
+\begin{frame}{Step 3: Obstacle Tracking}
+    Raw detections are noisy --- objects appear and disappear between frames.
+    \vfill
+    The \texttt{object\_tracking\_map} node tracks obstacles over time:
+    \begin{itemize}
+        \item Matches new detections to previously seen obstacles
+        \item Smooths positions across frames
+        \item Publishes an \texttt{ObstacleMap} message with all tracked obstacles
+    \end{itemize}
+    \vfill
+    Each obstacle has: a label (what it is), a position (where it is), and a convex hull (its shape).
+\end{frame}
+
+\begin{frame}{Perception Summary}
+    \begin{center}
+        Camera frame $\rightarrow$ YOLO (labels) $\rightarrow$ LiDAR fusion (3D positions) $\rightarrow$ Tracking (stable map)
+    \end{center}
+    \vfill
+    The output is an \texttt{ObstacleMap} --- a list of labeled obstacles with positions.
+    \vfill
+    This is what your code subscribes to when writing autonomy tasks. You don't need to worry about how perception works internally, just know that you'll get a list of obstacles with labels and positions.
+\end{frame}
+
+% ============================================================
+\section{Localization and Mapping}
+% ============================================================
+
+\begin{frame}{Where Are We?}
+    Perception tells us what's around us, but we also need to know where we are in the world.
+    \vfill
+    Two sources:
+    \begin{itemize}
+        \item GPS --- gives a global position (latitude/longitude, converted to x/y)
+        \item SLAM --- Simultaneous Localization and Mapping, refines our position by matching sensor data over time
+    \end{itemize}
+    \vfill
+    Together they give us the boat's position and heading in a global coordinate frame.
+\end{frame}
+
+\begin{frame}{Coordinate Frames}
+    The system uses two main frames:
+    \vfill
+    \begin{itemize}
+        \item \texttt{map} --- the fixed world frame (doesn't move)
+        \item \texttt{base\_link} --- attached to the boat (moves with it)
+    \end{itemize}
+    \vfill
+    Perception gives obstacles in \texttt{base\_link} (relative to the boat). \\
+    Using localization, we convert those into \texttt{map} coordinates (global positions).
+    \vfill
+    The obstacle map has both: \texttt{local\_point} (in base\_link) and \texttt{global\_point} (in map).
+\end{frame}
+
+\begin{frame}{Global Map}
+    The \texttt{object\_tracking\_map} node combines:
+    \begin{itemize}
+        \item Local obstacle detections (from perception)
+        \item Robot position (from localization)
+    \end{itemize}
+    \vfill
+    To produce a global obstacle map --- obstacle positions in the world frame that persist as the boat moves.
+    \vfill
+    There's also a grid map (\texttt{grid\_map\_generator}) that creates an occupancy grid for path planning --- think of it as a bird's-eye view where cells are either free or occupied.
+\end{frame}
+
+% ============================================================
+\section{Planning and Control}
+% ============================================================
+
+\begin{frame}{Planning: Where Do We Go?}
+    Given a goal position (e.g., midpoint between two buoys) and a map of obstacles, the planner finds a path.
+    \vfill
+    The \texttt{navigation\_server} uses A* search on the occupancy grid:
+    \begin{itemize}
+        \item Finds a path from the boat's position to the goal
+        \item Avoids obstacles on the grid
+        \item Returns a list of waypoints to follow
+    \end{itemize}
+    \vfill
+    In your lab, you drove directly to the midpoint with PID. On the real boat, A* finds a path around obstacles first.
+\end{frame}
+
+\begin{frame}{Control: How Do We Get There?}
+    The \texttt{controller\_server} takes the planned path and drives the boat along it.
+    \vfill
+    \begin{itemize}
+        \item PID control (like you wrote) to follow each waypoint
+        \item Potential field obstacle avoidance --- if something unexpected is close, steer away from it in real time
+        \item Outputs velocity commands to the thrusters
+    \end{itemize}
+    \vfill
+    This is the same idea as your lab (PID to a point), just with extra safety layers.
+\end{frame}
+
+\begin{frame}{Planning + Control Summary}
+    \begin{center}
+        Goal position $\rightarrow$ A* path planning $\rightarrow$ Path following (PID) $\rightarrow$ Thruster commands
+    \end{center}
+    \vfill
+    In your lab:
+    \begin{center}
+        Goal position $\rightarrow$ PID directly $\rightarrow$ Velocity commands
+    \end{center}
+    \vfill
+    The real system adds a planner between the goal and the PID to avoid obstacles along the way.
+\end{frame}
+
+% ============================================================
+\section{Task Execution}
+% ============================================================
+
+\begin{frame}{Tasks: What Should We Be Doing?}
+    Everything so far answers ``how do we get from A to B.''
+    \vfill
+    Tasks answer ``what is A and B in the first place?''
+    \vfill
+    Each competition task (entry gates, follow the path, docking, etc.) is a separate program that:
+    \begin{enumerate}
+        \item Reads the obstacle map
+        \item Decides what to do (find the next buoy pair, pick a dock, etc.)
+        \item Sends goal positions to the planner
+    \end{enumerate}
+\end{frame}
+
+\begin{frame}{Task Structure}
+    Each task is a Python class that inherits from \texttt{TaskServerBase}.
+    \vfill
+    Two methods to implement:
+    \begin{itemize}
+        \item \texttt{init\_setup()} --- runs once at the start (find initial buoys, etc.)
+        \item \texttt{control\_loop()} --- runs repeatedly (track buoys, send goals, check if done)
+    \end{itemize}
+    \vfill
+    \texttt{TaskServerBase} gives you helpers like:
+    \begin{itemize}
+        \item \texttt{move\_to\_point()} --- send the boat to a position
+        \item \texttt{get\_robot\_pose()} --- get the boat's current position
+        \item \texttt{mark\_successful()} --- signal that the task is done
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Task Manager}
+    The \texttt{run\_tasks} node is the state machine that runs everything.
+    \vfill
+    \begin{itemize}
+        \item Decides which task to execute next
+        \item Sends start/stop signals to task servers
+        \item Handles interrupts (e.g., harbor alert --- drop everything and respond to a signal)
+    \end{itemize}
+    \vfill
+    Each task runs as an action server. The task manager is the action client that tells them when to start.
+\end{frame}
+
+\begin{frame}{The Full Picture}
+    \begin{center}
+        \small
+        Task Manager $\rightarrow$ Task Server (e.g., Follow Path)
+    \end{center}
+    \begin{center}
+        $\downarrow$
+    \end{center}
+    \begin{center}
+        \small
+        ``Go to this point'' $\rightarrow$ Navigation Server (A* planning)
+    \end{center}
+    \begin{center}
+        $\downarrow$
+    \end{center}
+    \begin{center}
+        \small
+        Planned path $\rightarrow$ Controller Server (PID + avoidance) $\rightarrow$ Thrusters
+    \end{center}
+    \vfill
+    Meanwhile, perception is continuously running in the background, updating the obstacle map that everything else reads from.
+\end{frame}
+
+% ============================================================
+\section{Codebase Tour}
+% ============================================================
+
+\begin{frame}{Repository Structure}
+    The codebase is split into packages:
+    \vfill
+    \begin{itemize}
+        \item \texttt{all\_seaing\_perception} --- camera, LiDAR, YOLO, point cloud fusion, tracking
+        \item \texttt{all\_seaing\_navigation} --- A* planner, grid map
+        \item \texttt{all\_seaing\_controller} --- PID, potential field, thruster control
+        \item \texttt{all\_seaing\_autonomy} --- competition task implementations
+        \item \texttt{all\_seaing\_common} --- base classes (TaskServerBase, ActionServerBase)
+        \item \texttt{all\_seaing\_bringup} --- launch files and config
+        \item \texttt{all\_seaing\_driver} --- hardware interfaces
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Explore the Codebase}
+    Try to find these in the \texttt{all\_seaing\_vehicle} repo:
+    \vfill
+    \begin{enumerate}
+        \item Which node runs YOLO object detection?
+        \item What message type does the obstacle map use?
+        \item Where is \texttt{TaskServerBase} defined? What methods does it provide?
+        \item Find the follow-the-path task. What are \texttt{init\_setup()} and \texttt{control\_loop()} doing?
+        \item How does \texttt{run\_tasks.py} decide which task to run next?
+        \item Where are the PID gains configured?
+    \end{enumerate}
+    \vfill
+    Use \texttt{grep}, file search, or just browse the repo. Ask questions!
+\end{frame}
+
+\begin{frame}{Next Time}
+    Now you know how all the pieces fit together.
+    \vfill
+    Next meeting we'll start working with the real perception pipeline --- running it on recorded data and writing a controller that uses actual obstacle detections.
+\end{frame}
+
+\end{document}
