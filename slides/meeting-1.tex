@@ -1,0 +1,213 @@
+\documentclass[aspectratio=169]{beamer}
+
+\usetheme{Madrid}
+\usecolortheme{seahorse}
+
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\title{Meeting 1: Welcome to Arcturus}
+\subtitle{Autonomy Onboarding}
+\author{MIT Arcturus}
+\date{}
+
+\begin{document}
+
+\begin{frame}
+    \titlepage
+\end{frame}
+
+% ============================================================
+\section{The Boat}
+% ============================================================
+
+\begin{frame}{What We Do}
+    We build an autonomous boat that competes at RoboBoat every year.
+    \vfill
+    % TODO: photo/video of the boat
+    \begin{center}
+        \textit{(boat photo or competition footage here)}
+    \end{center}
+\end{frame}
+
+\begin{frame}{What the Boat Has to Do}
+    The competition has several tasks:
+    \vfill
+    \begin{itemize}
+        \item Follow the path --- drive through pairs of red and green buoys
+        \item Speed challenge --- same thing, but fast
+        \item Docking --- park in a specific spot
+        \item Delivery --- drop something off at a target
+    \end{itemize}
+    \vfill
+    % TODO: competition video or task diagram
+    Today we'll work on a simplified version of ``follow the path.''
+\end{frame}
+
+\begin{frame}{How the Boat Works (Big Picture)}
+    \begin{center}
+        \Large
+        Perception $\rightarrow$ Planning $\rightarrow$ Control
+    \end{center}
+    \vfill
+    \begin{enumerate}
+        \item Perception: cameras and LiDAR detect what's around the boat
+        \item Planning: software figures out where to go next
+        \item Control: motors drive the boat to that location
+    \end{enumerate}
+    \vfill
+    All of this is software that you will be writing and improving.
+\end{frame}
+
+% ============================================================
+\section{The Simulation}
+% ============================================================
+
+\begin{frame}{Let's Try It}
+    Before we explain anything, let's just run the simulation.
+    \vfill
+    \begin{enumerate}
+        \item Open your Docker container
+        \item Build the workspace and launch the sim
+        \item Drive the boat around with the keyboard (W/Q/E)
+    \end{enumerate}
+    \vfill
+    Follow the setup instructions in the lab doc.
+    \vfill
+    % TODO: screenshot of the sim in RViz
+\end{frame}
+
+\begin{frame}{What Just Happened?}
+    When you launched the sim, several programs started running:
+    \vfill
+    \begin{itemize}
+        \item One program simulates the boat's physics
+        \item One program reads your keyboard input
+        \item One program shows everything in RViz
+    \end{itemize}
+    \vfill
+    These programs are running at the same time and sending messages to each other.
+    \vfill
+    Let's look at those messages. Try running:
+    \begin{center}
+        \texttt{ros2 topic list}
+    \end{center}
+\end{frame}
+
+% ============================================================
+\section{ROS 2}
+% ============================================================
+
+\begin{frame}{What You Just Saw}
+    \texttt{ros2 topic list} showed you all the message channels in the system.
+    \vfill
+    Try this:
+    \begin{center}
+        \texttt{ros2 topic echo /boat\_pose}
+    \end{center}
+    \vfill
+    Drive the boat around while this is running. You'll see the position values change in real time.
+    \vfill
+    These message channels are called \textit{topics}.
+\end{frame}
+
+\begin{frame}{Nodes and Topics}
+    Now we can put names to what we saw:
+    \vfill
+    \begin{itemize}
+        \item Each program is called a \textit{node}
+        \item Nodes send messages to each other through \textit{topics}
+        \item Sending a message is called \textit{publishing}
+        \item Receiving messages is called \textit{subscribing}
+    \end{itemize}
+    \vfill
+    Example from our sim:
+    \begin{center}
+        Keyboard $\xrightarrow{\text{velocity commands}}$ Simulation $\xrightarrow{\text{boat position}}$ Visualization
+    \end{center}
+\end{frame}
+
+\begin{frame}{Why This Matters}
+    The keyboard program sends velocity commands on a topic.
+    \vfill
+    The simulation doesn't know or care where those commands come from --- it just listens to the topic.
+    \vfill
+    So we can write our own program that sends commands to the same topic, and the simulation will follow them.
+    \vfill
+    That's how we go from keyboard control to autonomous control.
+\end{frame}
+
+% ============================================================
+\section{Hands-On}
+% ============================================================
+
+\begin{frame}{Your First Node}
+    Goal: write a program that moves the boat forward automatically.
+    \vfill
+    \begin{enumerate}
+        \item Create a new Python file
+        \item Make it send a velocity command every 0.5 seconds
+        \item Register it so ROS 2 can find it
+        \item Run it and watch the boat move on its own
+    \end{enumerate}
+    \vfill
+    Follow the lab doc for the code and step-by-step instructions.
+\end{frame}
+
+\begin{frame}{Waypoint Following}
+    Moving forward is a start. Let's make the boat go to a specific point.
+    \vfill
+    The idea:
+    \begin{enumerate}
+        \item Know where the boat is (read its position from a topic)
+        \item Know where it should go (click a point in the visualizer)
+        \item If we're far from the target, speed up
+        \item If we're close, slow down
+        \item If we're pointed the wrong way, turn
+    \end{enumerate}
+    \vfill
+    This is called PID control --- steer harder when you're far, ease off when you're close.
+\end{frame}
+
+\begin{frame}{PID Control}
+    \begin{center}
+        \Large
+        correction = (how far off) + (for how long) + (how fast approaching)
+    \end{center}
+    \vfill
+    \begin{itemize}
+        \item P --- far from target? Steer hard. Close? Steer gently.
+        \item I --- been slightly off for a while? Nudge a bit more.
+        \item D --- approaching fast? Ease off so you don't overshoot.
+    \end{itemize}
+    \vfill
+    We give you a PID class. You feed it the error, it gives you back a motor command.
+\end{frame}
+
+\begin{frame}{Navigating Through Buoys}
+    Final challenge: drive through a course of red and green buoy pairs.
+    \vfill
+    \begin{enumerate}
+        \item Find the next pair of buoys ahead of the boat
+        \item Compute the midpoint between the red and green buoy
+        \item Use your waypoint follower to drive there
+        \item When you arrive, move on to the next pair
+        \item When there are no more pairs, stop
+    \end{enumerate}
+    \vfill
+    This is a simplified version of what the real boat does at competition.
+\end{frame}
+
+\begin{frame}{What You Built Today}
+    \begin{center}
+        \Large
+        Detect buoy pair $\rightarrow$ Find midpoint $\rightarrow$ PID to midpoint $\rightarrow$ Repeat
+    \end{center}
+    \vfill
+    On the real boat, ``detect buoy pair'' uses cameras and LiDAR instead of known positions, and ``PID to midpoint'' uses path planning to avoid obstacles.
+    \vfill
+    Next meeting: we'll look at how the real system works.
+\end{frame}
+
+\end{document}
